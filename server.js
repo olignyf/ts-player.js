@@ -139,7 +139,7 @@ https
 
     const url = new URL(req.url, `https://${req.headers.host || 'localhost'}`);
     let pathname = decodeURIComponent(url.pathname || '/');
-    if (pathname === '/') pathname = '/hls-example.html';
+    if (pathname === '/') pathname = '/ts-player.html';
 
     // Prevent path traversal.
     pathname = pathname.replace(/\\/g, '/');
