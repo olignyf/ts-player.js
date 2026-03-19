@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="
+default-src https: data: 'unsafe-inline' 'unsafe-eval';
+media-src https: data: blob:;
+">
+    <title>Instant TS to MP4 Virtual Player</title>
+  <!-- MediaInfo -->
+<script src="https://unpkg.com/mediainfo.js@0.3.7/dist/umd/index.min.js"></script>
+    <!-- hls.js -->
+    <!-- hls.js is loaded dynamically (local or CDN) via ?localHls=1 -->
+
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background: #1a1a1a; color: white; }
+        video { width: 80%; max-width: 800px; background: #000; border-radius: 8px; margin-top: 20px; }
+        .controls { background: #333; padding: 20px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+        #status { margin-top: 10px; color: #aaa; font-size: 0.9em; }
+        #debugOutput { width: 80%; max-width: 800px; background: #111; color: #ddd; padding: 12px; border-radius: 8px; overflow: auto; margin-top: 12px; font-size: 12px; }
+        #debugBtn { margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <h2>TS "On-the-Fly" Player</h2>
+        <input type="file" id="fileInput" accept=".ts" />
+        <div id="status">Select a .ts file to start virtual transmuxing...</div>
+        <button id="localHlsBtn" type="button">Use Local HLS</button>
+        <button id="noAudioBtn" type="button">No Audio</button>
+        <button id="debugBtn" type="button">Get HLS Debug</button>
+        <pre id="debugOutput"></pre>
+    </div>
+
+    <button id="downloadBtn" disabled>Download as MP4 (todo)</button>
+    <video id="video" controls></video>
+
+    <script>(async () => {
+        const params = new URLSearchParams(location.search);
+        const testFile = params.get('testFile');
+        const isTestMode = !!testFile;
+
+        // Defaults (match `npm run test:hls ... --localHls=1 --noWorker=1`):
+        // - localHls: ON by default
+        // - noWorker: ON by default
+        const localHlsParam = params.get('localHls');
+        const noWorkerParam = params.get('noWorker');
+        const useLocalHls =
+          localHlsParam == null || // default true if nothing is passed
+          localHlsParam === '' ||
+          localHlsParam === '1' ||
+          localHlsParam === 'true';
+
+        const disableWorker =
+          noWorkerParam == null || // default true if nothing is passed
+          noWorkerParam === '' ||
+          noWorkerParam === '1' ||
+          noWorkerParam === 'true' ||
+          useLocalHls;
+
+        const noAudioParam = params.get('noAudio');
+        const noAudioEnabled = noAudioParam === '1' || noAudioParam === 'true';
+        const testTimeoutMs = Number(params.get('testTimeoutMs') || '20000');
+
+        // Used by your locally instrumented hls.js to skip audio SourceBuffer creation.
+        globalThis.__HLS_PLAYER_TEST_VIDEO_ONLY = !!noAudioEnabled;
+        // Used by your locally instrumented hls.js to avoid clearing `levels/fragCurrent`
+        // while a fragment is in-flight (prevents "was dropped during download").
+        globalThis.__HLS_PLAYER_PRESERVE_MANIFEST_LOADING = !!useLocalHls;
+
+        const localHlsBtn = document.getElementById('localHlsBtn');
+        if (localHlsBtn) {
+          localHlsBtn.textContent = useLocalHls ? 'Using Local HLS' : 'Use Local HLS';
+          localHlsBtn.addEventListener('click', () => {
+            const nextUrl = new URL(location.href);
+            if (useLocalHls) {
+              // Since localHls defaults to ON when missing, explicitly switch OFF.
+              nextUrl.searchParams.set('localHls', '0');
+            } else {
+              nextUrl.searchParams.set('localHls', '1');
+            }
+            // keep noWorker if already set, but localHls implies disableWorker anyway.
+            location.href = nextUrl.toString();
+          });
+        }
+
+        const noAudioBtn = document.getElementById('noAudioBtn');
+        if (noAudioBtn) {
+          noAudioBtn.textContent = noAudioEnabled ? 'Audio On' : 'No Audio';
+          noAudioBtn.addEventListener('click', () => {
+            const nextUrl = new URL(location.href);
+            // Store explicit value so toggling works in both test + normal modes.
+            nextUrl.searchParams.set('noAudio', noAudioEnabled ? '0' : '1');
+            location.href = nextUrl.toString();
+          });
+        }
+
+        const cdnHls = 'https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js';
+        const localHlsCandidates = [
+          './hls.js/dist/hls.js',
+          './hls.js/dist/hls.min.js',
+          './hls.js/dist/hls.light.js',
+          './hls.js/dist/hls.light.min.js',
+        ];
+
+        function loadScript(src) {
+          return new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+            document.head.appendChild(s);
+          });
+        }
+
+        try {
+          if (useLocalHls) {
+            let lastErr = null;
+            for (const src of localHlsCandidates) {
+              try {
+                await loadScript(src);
+                break;
+              } catch (e) {
+                lastErr = e;
+              }
+            }
+            if (!window.Hls) {
+              console.warn('Local hls.js failed, falling back to CDN.', lastErr);
+              await loadScript(cdnHls);
+            }
+          } else {
+            await loadScript(cdnHls);
+          }
+        } catch (e) {
+          console.error('Failed to load hls.js', e);
+          throw e;
+        }
+
+        const fileInput = document.getElementById('fileInput');
+       const downloadBtn = document.getElementById('downloadBtn');
+        const status = document.getElementById('status');
+      const output = status;
+        const video = document.getElementById('video');
+        const debugBtn = document.getElementById('debugBtn');
+        const debugOutput = document.getElementById('debugOutput');
+
+        console.log(
+          `[player] flags localHls=${useLocalHls} noWorker=${disableWorker} noAudio=${noAudioEnabled}`,
+        );
+
+        if (isTestMode) {
+          fileInput.style.display = 'none';
+          status.innerText = `Test mode. Loading: ${testFile}`;
+        }
+
+        if (debugBtn) {
+          debugBtn.addEventListener('click', () => {
+            if (!window.getHlsDebug) {
+              debugOutput.textContent = 'HLS not initialized yet.';
+              return;
+            }
+            debugOutput.textContent = JSON.stringify(
+              window.getHlsDebug(),
+              null,
+              2,
+            );
+          });
+        }
+
+        const afterMediaInfo = async (file, mediaInfoAnalyzed) => {
+          try {                
+                const readChunk = async (size, offset) => {
+                    const chunk = file.slice(offset, offset + size);
+                    return new Uint8Array(await chunk.arrayBuffer());
+                };
+                const info = JSON.parse(mediaInfoAnalyzed);
+                
+                // Find duration (in milliseconds, convert to seconds)
+                const generalTrack = info.media.track.find(t => t['@type'] === 'General');
+                const duration = parseFloat(generalTrack.Duration);
+                const overallBitrate = parseInt(
+                  generalTrack.OverallBitRate || generalTrack.OverallBitRate_Precision_Min || '1000000',
+                  10,
+                );
+
+                const videoTrack = info.media.track.find(
+                  (t) => t['@type'] === 'Video',
+                );
+                const videoProfile = videoTrack?.Format_Profile;
+                const videoLevel = parseFloat(videoTrack?.Format_Level || '3.1');
+                const levelX10 = Math.round(videoLevel * 10);
+                const levelHex = levelX10
+                  .toString(16)
+                  .toLowerCase()
+                  .padStart(2, '0');
+                // Best-effort mapping from MediaInfo profile/level into an avc1.xx codec string.
+                // If your browser rejects it, try switching to a different file/profile.
+                const profileIdcHex =
+                  videoProfile === 'Main' ? '4d' : videoProfile === 'High' ? '64' : '42';
+
+                const audioCodec = 'mp4a.40.2';
+
+                // The "constraint/flags/reserved" byte inside avc1.* is hard to derive
+                // from MediaInfo alone. Try a small set and pick the first one
+                // supported by the current browser.
+                // Brute-force the constraint/flags byte. This is expensive-ish but
+                // only runs once per loaded TS file (and typically in test mode).
+                const videoCodecCandidates = [];
+                for (let cb = 0; cb <= 0x7f; cb++) {
+                  const constraintHex = cb
+                    .toString(16)
+                    .toLowerCase()
+                    .padStart(2, '0');
+                  videoCodecCandidates.push(
+                    `avc1.${profileIdcHex}${constraintHex}${levelHex}`,
+                  );
+                }
+
+                let videoCodec = videoCodecCandidates[0];
+                try {
+                  if (
+                    typeof MediaSource !== 'undefined' &&
+                    MediaSource.isTypeSupported
+                  ) {
+                    for (const c of videoCodecCandidates) {
+                      const mime = `video/mp4; codecs=\"${c},${audioCodec}\"`;
+                      if (MediaSource.isTypeSupported(mime)) {
+                        videoCodec = c;
+                        break;
+                      }
+                    }
+                  }
+                } catch (_) {
+                  // ignore and use default candidate
+                }
+
+                const bandwidth = Math.max(overallBitrate || 1000000, 500000);
+
+                if (!duration) throw new Error("Could not detect duration. Is this a valid TS file?");
+
+                status.innerText = `Duration: ${duration.toFixed(2)}s. Generating virtual manifest...`;
+
+                // 2. Create a local URL for the massive TS file
+                const fileUrl = URL.createObjectURL(file);
+
+                // 3. Construct the Virtual M3U8 (The "Table of Contents")
+                // Use a single segment backed by the full TS file.
+                // This reduces fragment-context churn and helps debugging the loader.
+                const m3u8Lines = [
+                  '#EXTM3U',
+                  '#EXT-X-VERSION:4',
+                  `#EXT-X-TARGETDURATION:${Math.ceil(duration)}`,
+                  '#EXT-X-MEDIA-SEQUENCE:0',
+                  '#EXT-X-PLAYLIST-TYPE:VOD',
+                  `#EXTINF:${duration.toFixed(3)},`,
+                  `#EXT-X-BYTERANGE:${file.size}@0`,
+                  'segment.ts',
+                  '#EXT-X-ENDLIST',
+                ];
+
+                const mediaPlaylistUrl = 'level0.m3u8';
+                const mediaPlaylistContent = m3u8Lines.join('\n');
+
+                // For this virtual test setup, return a media playlist as the "manifest"
+                // so hls.js treats it as a single-level VOD.
+                const masterPlaylistContent = mediaPlaylistContent;
+
+	  const hls = new Hls({
+                 debug: true,
+                 enableWorker: !disableWorker,
+                 startPosition: 0,
+	    loader: class extends Hls.DefaultConfig.loader {
+	      load(context, config, callbacks) {   
+                      this._loadId = (this._loadId || 0) + 1;
+                      const loadId = this._loadId;
+                      if (context == null) {
+                        console.warn('loader context is null');
+                        return;
+                      }
+
+                      // Playlist/manifest loads have context.type set (and responseType 'text')
+                      if (context.type === 'manifest') {
+                        console.log(
+                          `[virtual-loader] MANIFEST load url=${context.url} responseType=${context.responseType}`,
+                        );
+                        const stats = this.stats;
+                        const now = performance.now();
+                        stats.loading.start = now;
+                        stats.loading.first = now;
+                        stats.loading.end = now;
+                        stats.loaded = stats.total = masterPlaylistContent.length;
+
+                        callbacks.onSuccess(
+                          { url: context.url, data: masterPlaylistContent },
+                          stats,
+                          context,
+                          null,
+                        );
+                        return;
+                      }
+
+                      if (context.type === 'level') {
+                        console.log(
+                          `[virtual-loader] LEVEL load url=${context.url} responseType=${context.responseType}`,
+                        );
+                        const stats = this.stats;
+                        const now = performance.now();
+                        stats.loading.start = now;
+                        stats.loading.first = now;
+                        stats.loading.end = now;
+                        stats.loaded = stats.total = mediaPlaylistContent.length;
+
+                        callbacks.onSuccess(
+                          { url: context.url, data: mediaPlaylistContent },
+                          stats,
+                          context,
+                          null,
+                        );
+                        return;
+                      }
+
+                      // Fragment/segment loads have responseType='arraybuffer' and no context.type.
+                      // Intercept only fragment/part loads (not other potential arraybuffer loaders).
+                      if (
+                        context.responseType === 'arraybuffer' &&
+                        'frag' in context &&
+                        context.frag &&
+                        !('keyInfo' in context)
+                      ) {
+                        const stats = this.stats;
+                        const now = performance.now();
+                        stats.loading.start = now;
+                        stats.loading.first = now;
+                        stats.loading.end = now;
+
+                        const rangeStart =
+                          typeof context.rangeStart === 'number'
+                            ? context.rangeStart
+                            : 0;
+                        // rangeEnd is exclusive (hls.js uses Range: bytes=start-end-1)
+                        const rangeEnd =
+                          typeof context.rangeEnd === 'number' &&
+                          context.rangeEnd > rangeStart
+                            ? context.rangeEnd
+                            : file.size;
+
+                        const fragMeta = {
+                          sn: context.frag?.sn,
+                          level: context.frag?.level,
+                          cc: context.frag?.cc,
+                          type: context.frag?.type,
+                          isInit: context.frag?.sn === 'initSegment',
+                        };
+
+                        file
+                          .slice(rangeStart, rangeEnd)
+                          .arrayBuffer()
+                          .then((payload) => {
+                            const elapsedMs =
+                              performance.now() - stats.loading.start;
+                            if (window.__hlsTestState) {
+                              window.__hlsTestState.fragLoadCount =
+                                (window.__hlsTestState.fragLoadCount || 0) + 1;
+                              window.__hlsTestState.lastFragRange = {
+                                rangeStart,
+                                rangeEnd,
+                              };
+                              window.__hlsTestState.lastFragPayloadBytes =
+                                payload.byteLength;
+                              window.__hlsTestState.lastFragReadMs = elapsedMs;
+                              window.__hlsTestState.lastFragMeta = fragMeta;
+                              if (window.__hlsTestState.fragLoadCount <= 3) {
+                                console.log(
+                                  `[virtual-loader] frag #${window.__hlsTestState.fragLoadCount} meta=${JSON.stringify(
+                                    fragMeta,
+                                  )} range=${rangeStart}-${rangeEnd} bytes=${payload.byteLength} readMs=${elapsedMs.toFixed(
+                                    1,
+                                  )}`,
+                                );
+                              }
+                            }
+
+                            // If hls.js aborted/replaced this fragment load in the meantime,
+                            // don't emit progressive events or success for stale responses.
+                            if (loadId !== this._loadId) return;
+
+                            const end = performance.now();
+                            stats.loading.end = end;
+                            stats.loaded = stats.total = payload.byteLength;
+                            const denom = Math.max(
+                              end - stats.loading.first,
+                              0.0001,
+                            );
+                            stats.bwEstimate = (stats.total * 8000) / denom;
+
+                            // Some hls.js paths expect progressive progress callbacks.
+                            // If provided, emit a final "progress" event before success.
+                            try {
+                              if (typeof callbacks.onProgress === 'function') {
+                                callbacks.onProgress(
+                                  stats,
+                                  context,
+                                  payload,
+                                  null,
+                                );
+                              }
+                            } catch (_) {
+                              // ignore progress emit issues
+                            }
+
+                            callbacks.onSuccess(
+                              { url: context.url, data: payload },
+                              stats,
+                              context,
+                              null,
+                            );
+                          })
+                          .catch((err) => {
+                          if (loadId !== this._loadId) return;
+                          console.error(err);
+                          callbacks.onError(
+                            { code: 0, text: err.message },
+                            context,
+                            null,
+                            this.stats,
+                          );
+                        });
+                        return;
+                      }
+
+                      super.load(context, config, callbacks);
+	      }
+
+              abort() {
+                // Invalidate any in-flight async fragment responses.
+                this._loadId = (this._loadId || 0) + 1;
+                if (isTestMode && window.__hlsTestState) {
+                  window.__hlsTestState.abortCount =
+                    (window.__hlsTestState.abortCount || 0) + 1;
+                  console.log('[virtual-loader] abort() called');
+                }
+                return super.abort();
+              }
+
+              destroy() {
+                // Invalidate any in-flight async fragment responses.
+                this._loadId = (this._loadId || 0) + 1;
+                if (isTestMode && window.__hlsTestState) {
+                  window.__hlsTestState.destroyCount =
+                    (window.__hlsTestState.destroyCount || 0) + 1;
+                  console.log('[virtual-loader] destroy() called');
+                }
+                return super.destroy();
+              }
+	    }
+	  });
+
+          if (isTestMode) {
+            window.__hlsTestState = window.__hlsTestState || {};
+            // Let local instrumented `hls.js` preserve in-flight controller state
+            // when a manifest reload happens mid-fragment in this virtual single-segment setup.
+            globalThis.__HLS_PLAYER_PRESERVE_MANIFEST_LOADING = true;
+            hls.on(Hls.Events.MANIFEST_LOADING, () => {
+              console.log('[test] MANIFEST_LOADING');
+            });
+            hls.on(Hls.Events.MANIFEST_LOADED, () => {
+              console.log('[test] MANIFEST_LOADED');
+            });
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+              console.log('[test] MANIFEST_PARSED');
+            });
+
+            hls.on(Hls.Events.LEVEL_SWITCHING, (event, data) => {
+              console.log('[test] LEVEL_SWITCHING', data?.level);
+            });
+            hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+              console.log('[test] LEVEL_SWITCHED', data?.level);
+            });
+            hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+              console.log('[test] LEVEL_LOADED', data?.level);
+            });
+            hls.on(Hls.Events.BUFFER_CREATED, () => {
+              console.log('[test] BUFFER_CREATED');
+            });
+
+            hls.on(Hls.Events.BUFFER_CODECS, (event, data) => {
+              window.__hlsTestState.bufferCodecs = data || null;
+              window.__hlsTestState.codecsReady = true;
+              console.log('[test] BUFFER_CODECS fired', data);
+            });
+            hls.on(Hls.Events.BUFFER_APPENDED, (event, data) => {
+              window.__hlsTestState.bufferAppended = true;
+              window.__hlsTestState.lastAppended = data || null;
+              console.log('[test] BUFFER_APPENDED fired');
+            });
+            hls.on(Hls.Events.BUFFER_RESET, () => {
+              window.__hlsTestState.bufferResets =
+                (window.__hlsTestState.bufferResets || 0) + 1;
+              console.log('[test] BUFFER_RESET fired');
+            });
+
+            hls.on(Hls.Events.FRAG_LOADING, (event, data) => {
+              window.__hlsTestState.fragLoadingCount =
+                (window.__hlsTestState.fragLoadingCount || 0) + 1;
+              if (data && data.frag) {
+                window.__hlsTestState.lastFragLoading = {
+                  sn: data.frag.sn,
+                  part: data.part ? data.part.index : null,
+                  level: data.frag.level,
+                  type: data.frag.type,
+                };
+              }
+              console.log('[test] FRAG_LOADING', data?.frag?.sn, 'part', data?.part?.index);
+            });
+            hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+              window.__hlsTestState.fragLoadedCount =
+                (window.__hlsTestState.fragLoadedCount || 0) + 1;
+              if (data && data.frag) {
+                window.__hlsTestState.lastFragLoaded = {
+                  sn: data.frag.sn,
+                  part: data.part ? data.part.index : null,
+                  level: data.frag.level,
+                  loadedBytes: data.frag?.stats?.loaded,
+                  type: data.frag.type,
+                };
+              }
+              console.log('[test] FRAG_LOADED', data?.frag?.sn);
+            });
+            hls.on(Hls.Events.FRAG_BUFFERED, (event, data) => {
+              window.__hlsTestState.fragBufferedCount =
+                (window.__hlsTestState.fragBufferedCount || 0) + 1;
+              window.__hlsTestState.lastFragBuffered = data || null;
+              console.log('[test] FRAG_BUFFERED', data?.frag?.sn);
+            });
+          }
+	
+	  hls.attachMedia(video);
+
+          if (isTestMode) {
+            window.__hlsTestState = window.__hlsTestState || {};
+            window.__hlsTestState.startedAt = Date.now();
+            window.__hlsTestState.phase = 'attached';
+            window.__hlsTestState.done = false;
+            window.__hlsTestState.success = null;
+            window.__hlsTestState.lastHlsError = null;
+            window.__hlsTestState.videoBuffered = [];
+
+            const computeBuffered = () => {
+              if (!video.buffered) return [];
+              const out = [];
+              for (let i = 0; i < video.buffered.length; i++) {
+                out.push({ start: video.buffered.start(i), end: video.buffered.end(i) });
+              }
+              return out;
+            };
+
+            const poll = () => {
+              if (window.__hlsTestState.done) return;
+              const ranges = computeBuffered();
+              window.__hlsTestState.videoBuffered = ranges;
+              try {
+                window.__hlsTestState.hlsState = hls.state;
+                if (hls.fragCurrent) {
+                  window.__hlsTestState.fragCurrent = {
+                    sn: hls.fragCurrent.sn,
+                    level: hls.fragCurrent.level,
+                    cc: hls.fragCurrent.cc,
+                    type: hls.fragCurrent.type,
+                  };
+                } else {
+                  window.__hlsTestState.fragCurrent = null;
+                }
+              } catch (_) {
+                // ignore private-access issues
+              }
+              if (ranges.length && (ranges[0].end - ranges[0].start) > 0.25) {
+                window.__hlsTestState.success = true;
+                window.__hlsTestState.done = true;
+                window.__hlsTestState.phase = 'buffered';
+              }
+            };
+
+            window.__hlsTestState.pollIntervalMs = 250;
+            const intervalId = window.setInterval(poll, 250);
+            window.__hlsTestState.intervalId = intervalId;
+
+            window.setTimeout(() => {
+              if (window.__hlsTestState.done) return;
+              window.__hlsTestState.success = false;
+              window.__hlsTestState.done = true;
+              window.__hlsTestState.phase = 'timeout';
+              window.__hlsTestState.timeoutMs = testTimeoutMs;
+              window.clearInterval(intervalId);
+            }, testTimeoutMs);
+          }
+hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+            hls.loadSource('virtual.m3u8');
+        });
+	  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+console.log('playing');
+	    status.innerText = 'Playing via virtual transmuxing';
+            // In test mode we only care about buffering/remuxing;
+            // calling play() can trigger seek/tick behavior and interfere
+            // with the first fragment load.
+            if (!isTestMode) {
+              video.play();
+            }
+            if (isTestMode && window.__hlsTestState) {
+              window.__hlsTestState.phase = 'manifestParsed';
+            }
+	  });
+
+          function getBufferedRanges() {
+            if (!video.buffered) return [];
+            const out = [];
+            for (let i = 0; i < video.buffered.length; i++) {
+              out.push({
+                start: video.buffered.start(i),
+                end: video.buffered.end(i),
+              });
+            }
+            return out;
+          }
+
+          function getHlsDebugSnapshot() {
+            return {
+              url: hls.url,
+              currentLevel: hls.currentLevel,
+              levels: hls.levels?.map((l) => ({
+                bitrate: l.bitrate,
+                width: l.width,
+                height: l.height,
+                name: l.name,
+              })),
+              bufferInfo: hls.bufferInfo,
+              latency: hls.latency,
+              lastHlsError,
+              videoBuffered: getBufferedRanges(),
+            };
+          }
+
+          window.getHlsDebug = getHlsDebugSnapshot;
+
+          let lastHlsError = null;
+ hls.on(Hls.Events.ERROR, (event, data) => {
+    lastHlsError = data;
+    if (isTestMode && window.__hlsTestState) {
+      window.__hlsTestState.lastHlsError = data;
+      if (data && data.fatal) {
+        window.__hlsTestState.success = false;
+        window.__hlsTestState.done = true;
+        window.__hlsTestState.phase = 'fatalError';
+      }
+    }
+    console.error('HLS.js error:', data);
+    if (data.fatal) {
+        console.error('Fatal error! Trying to recover...');
+        switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+                console.log('Attempting to recover network error...');
+                hls.startLoad();
+                break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+                console.log('Attempting to recover media error...');
+                hls.recoverMediaError();
+                break;
+            default:
+                console.log('Cannot recover, destroying HLS instance.');
+                hls.destroy();
+                break;
+        }
+    }
+});
+	
+	  // hls.js will auto-start loading once the manifest is loaded.
+
+            } catch (err) {
+                console.error(err);
+                status.innerText = "Error: " + err.message;
+            }
+        };
+
+const runFile = async (mediainfo, file) => {
+  if (!file) return;
+
+  output.value = 'Working…';
+
+  const getSize = () => file.size;
+
+  const readChunk = (chunkSize, offset) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = event => {
+        if (event.target.error) {
+          reject(event.target.error);
+        }
+        resolve(new Uint8Array(event.target.result));
+      };
+      reader.readAsArrayBuffer(file.slice(offset, offset + chunkSize));
+    });
+
+  const jsonData = await mediainfo
+    .analyzeData(getSize, readChunk)
+    .then(result => {
+      console.log('result', result);
+      output.value = result;
+      afterMediaInfo(file, result);
+      return result;
+    })
+    .catch(error => {
+      output.value = `An error occured:\n${error.stack}`;
+      throw error;
+    });
+
+  console.log('jsonData', jsonData);
+};
+
+const onChangeFile = async mediainfo => {
+  const file = fileInput.files[0];
+  await runFile(mediainfo, file);
+};
+
+// MediaInfo needs to be instanciated like that.
+MediaInfo.default({ format: 'JSON' },
+  mediainfo => {
+    fileInput.removeAttribute('disabled');
+
+    if (isTestMode) {
+      (async () => {
+        try {
+          status.innerText = `Test mode: fetching ${testFile} ...`;
+          const testUrl = new URL(testFile, location.href).toString();
+          const resp = await fetch(testUrl);
+          if (!resp.ok) {
+            throw new Error(`Failed to fetch ${testFile}: ${resp.status} ${resp.statusText}`);
+          }
+          const blob = await resp.blob();
+          const file = new File([blob], testFile, { type: 'video/MP2T' });
+          status.innerText = `Test mode: analyzing ${testFile} ...`;
+          await runFile(mediainfo, file);
+        } catch (e) {
+          console.error('❌ Test mode failed:', e);
+          status.innerText = `Test mode error: ${e.message || String(e)}`;
+          window.__hlsTestState = window.__hlsTestState || {};
+          window.__hlsTestState.success = false;
+          window.__hlsTestState.done = true;
+          window.__hlsTestState.phase = 'testInitError';
+          window.__hlsTestState.error = e.message || String(e);
+        }
+      })();
+    } else {
+      fileInput.addEventListener('change', () => onChangeFile(mediainfo));
+    }
+  },
+  err => {
+    console.error(err);
+    console.error('❌ Failed to initialize MediaInfo:', err);
+  },
+);
+
+})();
+    </script>
+</body>
+</html>

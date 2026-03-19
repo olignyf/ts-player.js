@@ -1,0 +1,12 @@
+{
+  "name": "hls-player",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "scripts": {
+    "test:hls": "node test/run-hls-unit.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
+}
