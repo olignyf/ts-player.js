@@ -27,8 +27,9 @@ const headfulEnabled =
   headfulFlag === '1' || String(headfulFlag).toLowerCase() === 'true';
 const keepOpenMs = Number(getArg('keepOpenMs', headfulEnabled ? '15000' : '0'));
 const channel = getArg('channel', '');
+const pageName = getArg('page', 'ts-player.html');
 
-const PORT = Number(getArg('port', '8443'));
+const PORT = Number(getArg('port', '8444'));
 const HOST = getArg('host', 'localhost');
 
 function delay(ms) {
@@ -51,7 +52,7 @@ function httpsStatus(url) {
 }
 
 async function ensureServer() {
-  const url = `https://${HOST}:${PORT}/hls-example.html`;
+  const url = `https://${HOST}:${PORT}/${pageName}`;
   for (let i = 0; i < 20; i++) {
     try {
       const code = await httpsStatus(url);
@@ -82,7 +83,7 @@ async function main() {
   await ensureServer();
 
   const base =
-    `https://${HOST}:${PORT}/hls-example.html` +
+    `https://${HOST}:${PORT}/${pageName}` +
     `?testFile=${encodeURIComponent(testFile)}` +
     `&testTimeoutMs=${encodeURIComponent(String(testTimeoutMs))}` +
     `&noWorker=${encodeURIComponent(noWorker)}` +

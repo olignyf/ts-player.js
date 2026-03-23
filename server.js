@@ -11,7 +11,7 @@ const path = require('path');
 const { URL } = require('url');
 
 const ROOT = __dirname;
-const PORT = Number(process.env.PORT || 8443);
+const PORT = Number(process.env.PORT || 8444);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const CERT_PFX_PATH = path.join(ROOT, process.env.CERT_PFX_PATH || 'cert.pfx');
