@@ -162,6 +162,5 @@ https
   })
   .listen(PORT, HOST, () => {
     console.log(`HTTPS server running: https://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}/`);
-    console.log('Serve your page at: https://localhost:' + PORT + '/hls-example.html');
   });
 
