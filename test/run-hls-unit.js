@@ -21,6 +21,7 @@ const testFile =
   getArg('testFile', 'Gop 12000 IP-2017-05-16-16h24m43s.ts');
 const localHls = getArg('localHls', '0'); // 1 => try ./hls.js/dist/*
 const noWorker = getArg('noWorker', '1');
+const noAudio = getArg('noAudio', '0');
 const testTimeoutMs = Number(getArg('testTimeoutMs', '20000'));
 const headfulFlag = getArg('headful', '0');
 const headfulEnabled =
@@ -87,7 +88,8 @@ async function main() {
     `?testFile=${encodeURIComponent(testFile)}` +
     `&testTimeoutMs=${encodeURIComponent(String(testTimeoutMs))}` +
     `&noWorker=${encodeURIComponent(noWorker)}` +
-    `&localHls=${encodeURIComponent(localHls)}`;
+    `&localHls=${encodeURIComponent(localHls)}` +
+    `&noAudio=${encodeURIComponent(noAudio)}`;
 
   const browser = await chromium.launch({
     headless: !headfulEnabled,
